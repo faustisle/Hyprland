@@ -91,7 +91,10 @@ void CMonitorFrameScheduler::onFrame() {
 
     PMONITOR->m_tearingState.busy = false;
 
-    if (PMONITOR->m_tearingState.activelyTearing && PMONITOR->m_solitaryClient.lock() /* can be invalidated by a recheck */) {
+    // Forced tearing renders every scheduled frame; it does not rely on a solitary
+    // client or on the per-client tearing rule to request frames.
+    if (!PMONITOR->forceTearing() && PMONITOR->m_tearingState.activelyTearing &&
+        PMONITOR->m_solitaryClient.lock() /* can be invalidated by a recheck */) {
 
         if (!PMONITOR->m_tearingState.frameScheduledWhileBusy)
             return; // we did not schedule a frame yet to be displayed, but we are tearing. Why render?

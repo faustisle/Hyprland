@@ -201,6 +201,21 @@ void CMonitorRuleManager::ensureVRR(PHLMONITOR pMonitor) {
         if (!m->m_output || m->m_createdByUser)
             return;
 
+        // Async page flips and VRR are mutually exclusive. Forced tearing takes
+        // precedence over any VRR configuration.
+        if (m->forceTearing()) {
+            if (m->m_vrrActive) {
+                m->m_output->state->resetExplicitFences();
+                m->m_output->state->setAdaptiveSync(false);
+
+                if (!m->m_state.commit())
+                    LOG(Log::ERR, "Couldn't disable VRR for forced tearing on {}", m->m_output->name);
+            }
+
+            m->m_vrrActive = false;
+            return;
+        }
+
         const auto USEVRR = m->m_activeMonitorRule.m_vrr.has_value() ? m->m_activeMonitorRule.m_vrr.value() : *PVRR;
 
         if (USEVRR == 0) {

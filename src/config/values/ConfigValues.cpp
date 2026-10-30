@@ -184,6 +184,10 @@ std::vector<SP<IValue>> Values::getConfigValues() {
                 {.min = 0, .max = 100}),
         MS<Bool>("general:hover_icon_on_border", "show a cursor icon when hovering over borders, only used when general:resize_on_border is on.", true),
         MS<Bool>("general:allow_tearing", "master switch for allowing tearing to occur.", false),
+        MS<Bool>("general:force_tearing",
+                 "experimental: force tearing on every output frame, even outside of fullscreen windows. Requires a DRM backend with async "
+                 "page-flip support; implies render:async_commit and software cursors.",
+                 false, {.refresh = Supplementary::REFRESH_MONITOR_STATES}),
         MS<Int>("general:resize_corner", "force floating windows to use a specific corner when being resized (1-4 going clockwise from top left, 0 to disable)", 0,
                 {.min = 0, .max = 4, .map = OptionMap{{"disable", 0}, {"top_left", 1}, {"top_right", 2}, {"bottom_right", 3}, {"bottom_left", 4}}}),
         MS<Bool>("general:snap:enabled", "enable snapping for floating windows", false),

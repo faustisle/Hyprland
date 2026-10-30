@@ -1826,18 +1826,32 @@ void CMonitor::recheckSolitary() {
     m_solitaryClient = Fullscreen::controller()->getFullscreenWindow(m_self.lock());
 }
 
+bool CMonitor::forceTearing() {
+    static auto PFORCETEARING = CConfigValue<Config::INTEGER>("general:force_tearing");
+
+    return *PFORCETEARING != 0;
+}
+
+bool CMonitor::forceTearingSupported() {
+    return forceTearing() && m_tearingState.canTear && m_output && m_output->supportsTearing() && m_output->supportsTearingFormat(m_drmFormat);
+}
+
 uint8_t CMonitor::isTearingBlocked(bool full) {
     uint8_t     reasons = 0;
 
     static auto PTEARINGENABLED = CConfigValue<Config::INTEGER>("general:allow_tearing");
 
-    if (!m_tearingState.nextRenderTorn) {
+    const bool  FORCE = forceTearing();
+
+    // Forced tearing bypasses all client / window eligibility rules. It still
+    // requires a backend that can actually submit asynchronous page flips.
+    if (!FORCE && !m_tearingState.nextRenderTorn) {
         reasons |= TC_NOT_TORN;
         if (!full)
             return reasons;
     }
 
-    if (!*PTEARINGENABLED) {
+    if (!FORCE && !*PTEARINGENABLED) {
         reasons |= TC_USER;
         if (!full) {
             LOG(Log::WARN, "Tearing commit requested but the master switch general:allow_tearing is off, ignoring");
@@ -1845,7 +1859,8 @@ uint8_t CMonitor::isTearingBlocked(bool full) {
         }
     }
 
-    if (CMonitorZoomController::zoomFactor(m_cursorZoom->value(), m_zoomAnimProgress->value(),
+    if (!FORCE &&
+        CMonitorZoomController::zoomFactor(m_cursorZoom->value(), m_zoomAnimProgress->value(),
                                            m_self == State::monitorState()->query().vec(Pointer::mgr()->untransformedPosition()).run()) != 1.F) {
         reasons |= TC_ZOOM;
         if (!full) {
@@ -1854,17 +1869,31 @@ uint8_t CMonitor::isTearingBlocked(bool full) {
         }
     }
 
-    if (!m_tearingState.canTear) {
+    // Forced tearing needs the asynchronous commit path, as synchronous commits
+    // are paced to vblank and would defeat the point of tearing. Also make sure
+    // the current scanout format can actually be flipped asynchronously.
+    const bool ASYNC_SUPPORTED = !FORCE || forceTearingSupported();
+
+    if (!m_tearingState.canTear || !ASYNC_SUPPORTED) {
         reasons |= TC_SUPPORT;
         if (!full) {
-            LOG(Log::WARN, "Tearing commit requested but monitor doesn't support it, ignoring");
+            // Forced tearing is opt-in and expected to be a no-op on outputs
+            // without async flip support. hyprctl shows the reason instead of
+            // spamming the log every frame.
+            if (!FORCE)
+                LOG(Log::WARN, "Tearing commit requested but monitor doesn't support it, ignoring");
             return reasons;
         }
     }
 
-    // TODO: remove this when kernel allows tearing + hw cursor updated
+    // Tearing requires software cursors: hardware cursor updates are not
+    // allowed while an async flip is pending. updateTearing() switches the
+    // pointer backend when forced tearing is waiting for this.
     if (Pointer::mgr()->hasVisibleHWCursor(m_self.lock()))
         reasons |= TC_HW_CURSOR;
+
+    if (FORCE)
+        return reasons;
 
     if (m_solitaryClient.expired()) {
         reasons |= TC_CANDIDATE;
@@ -1891,8 +1920,28 @@ void CMonitor::updateSurfaceScaleTransformDetails() {
 }
 
 bool CMonitor::updateTearing() {
+    const bool WAS_TEARING = m_tearingState.activelyTearing;
+
     m_tearingState.activelyTearing = !isTearingBlocked();
     m_tearingState.nextRenderTorn  = false;
+
+    // Tearing uses software cursors. Switch the pointer backend lazily, outside
+    // of the render path, when the mode changes, or while forced tearing is
+    // waiting for a visible hardware cursor to be replaced.
+    const bool WAITING_FOR_SW_CURSOR = forceTearingSupported() && !m_tearingState.activelyTearing && Pointer::mgr()->hasVisibleHWCursor(m_self.lock());
+
+    if (WAS_TEARING != m_tearingState.activelyTearing || WAITING_FOR_SW_CURSOR) {
+        g_pEventLoopManager->doLater([self = m_self, WAITING_FOR_SW_CURSOR] {
+            if (!self)
+                return;
+
+            Pointer::mgr()->refreshCursorBackend();
+
+            if (WAITING_FOR_SW_CURSOR)
+                self->scheduleFrame(Aquamarine::IOutput::AQ_SCHEDULE_NEEDS_FRAME);
+        });
+    }
+
     return m_tearingState.activelyTearing;
 }
 
@@ -2035,6 +2084,13 @@ bool CMonitor::attemptDirectScanout() {
     }
 
     const auto params = PSURFACE->m_current.buffer->dmabuf();
+
+    // An asynchronous flip may not be supported for every scanout format.
+    // Fall back to composition if this buffer cannot be torn.
+    if (m_tearingState.activelyTearing && !m_output->supportsTearingFormat(params.format, params.modifier)) {
+        LOG(Log::TRACE, "attemptDirectScanout: buffer format {} (mod {}) doesn't support async flips", params.format, params.modifier);
+        return false;
+    }
 
     LOG(Log::TRACE, "attemptDirectScanout: surface {:x} passed, will attempt, buffer {} fmt: {} -> {} (mod {})", rc<uintptr_t>(PSURFACE.get()),
         rc<uintptr_t>(PSURFACE->m_current.buffer.m_buffer.get()), m_drmFormat, params.format, params.modifier);
@@ -2201,6 +2257,12 @@ bool CMonitor::shouldUseSoftwareCursors() {
     if (m_tearingState.activelyTearing)
         return true;
 
+    // Forced tearing needs the cursor to be part of the torn frame. Apply this
+    // as soon as the option is enabled, not only once a frame has activated
+    // tearing, so pointer movement can start scheduling frames again.
+    if (forceTearingSupported())
+        return true;
+
     if (*PINVISIBLE != 0)
         return true;
 
@@ -2288,7 +2350,7 @@ void CMonitor::debugLastPresentation(const std::string& message) {
 }
 
 void CMonitor::onCursorMovedOnMonitor() {
-    if (!m_tearingState.activelyTearing || !m_solitaryClient || !g_pHyprRenderer->shouldRenderCursor())
+    if (!m_tearingState.activelyTearing || !g_pHyprRenderer->shouldRenderCursor())
         return;
 
     // submit a frame immediately. This will only update the cursor pos.
@@ -2635,14 +2697,24 @@ bool CMonitorState::updateSwapchain() {
         return true;
     }
 
-    if (OPTIONS.format == m_owner->m_drmFormat && OPTIONS.scanout && OPTIONS.length == 3 && OPTIONS.size == MODE->pixelSize)
+    // Tearing needs scanout buffers allocated with a modifier the output can
+    // flip asynchronously. Recompose (and reallocate) when forced tearing is
+    // toggled so we don't keep using, e.g., a CCS modifier that the DRM backend
+    // has to present synchronously.
+    const bool TEARING = m_owner->forceTearingSupported();
+    const bool MATCHES = OPTIONS.format == m_owner->m_drmFormat && OPTIONS.scanout && OPTIONS.length == 3 && OPTIONS.size == MODE->pixelSize && OPTIONS.tearing == TEARING &&
+        OPTIONS.scanoutOutput == m_owner->m_output;
+
+    if (MATCHES)
         return true;
 
-    auto options    = OPTIONS;
-    options.format  = m_owner->m_drmFormat;
-    options.scanout = true;
-    options.length  = 3;
-    options.size    = MODE->pixelSize;
+    auto options          = OPTIONS;
+    options.format        = m_owner->m_drmFormat;
+    options.scanout       = true;
+    options.length        = 3;
+    options.size          = MODE->pixelSize;
+    options.tearing       = TEARING;
+    options.scanoutOutput = m_owner->m_output;
     return m_owner->m_output->swapchain->reconfigure(options);
 }
 void CMonitorState::applyModeWithSwapchain(const SP<Aquamarine::SOutputMode>& mode) {

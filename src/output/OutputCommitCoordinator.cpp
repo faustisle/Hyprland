@@ -26,7 +26,12 @@ COutputCommitCoordinator::~COutputCommitCoordinator() {
 bool COutputCommitCoordinator::asyncEnabled() const {
     static auto PASYNCCOMMIT = CConfigValue<Config::INTEGER>("render:async_commit");
 
-    return *PASYNCCOMMIT && m_monitor && m_monitor->m_output && (m_monitor->m_output->commitCapabilities() & Aquamarine::IOutput::AQ_OUTPUT_COMMIT_CAPABILITY_QUEUED);
+    // Forced tearing is only useful when commits are not paced to vblank, so
+    // it implies the asynchronous commit path.
+    const bool FORCETEARING = m_monitor && m_monitor->forceTearingSupported();
+
+    return (*PASYNCCOMMIT || FORCETEARING) && m_monitor && m_monitor->m_output &&
+        (m_monitor->m_output->commitCapabilities() & Aquamarine::IOutput::AQ_OUTPUT_COMMIT_CAPABILITY_QUEUED);
 }
 
 bool COutputCommitCoordinator::canBeginFrame() const {

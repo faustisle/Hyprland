@@ -64,6 +64,10 @@ namespace Pointer {
         bool softwareLockedFor(PHLMONITOR pMonitor);
         bool hasVisibleHWCursor(PHLMONITOR pMonitor);
 
+        // Re-evaluates whether outputs should use hardware or software cursors.
+        // Needed when a monitor's tearing state changes, as tearing requires software cursors.
+        void refreshCursorBackend();
+
         void renderSoftwareCursorsFor(Render::CRenderContext& ctx, PHLMONITOR pMonitor, const Time::steady_tp& now, CRegion& damage /* logical */,
                                       std::optional<Vector2D> overridePos = {} /* monitor-local */, bool screencopy = false, bool forceRender = false);
 

@@ -151,6 +151,10 @@ bool CPointerManager::hasVisibleHWCursor(PHLMONITOR pMonitor) {
     return state->softwareLocks == 0 && !state->hardwareFailed && hasCursor() && g_pHyprRenderer->shouldRenderCursor();
 }
 
+void CPointerManager::refreshCursorBackend() {
+    updateCursorBackend();
+}
+
 Vector2D CPointerManager::position() {
     if (m_transformers.empty())
         return m_pointerPos;

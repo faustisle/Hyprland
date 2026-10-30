@@ -278,6 +278,8 @@ namespace Monitor {
         uint32_t     isSolitaryBlocked(bool full = false);
         void         recheckSolitary();
         uint8_t      isTearingBlocked(bool full = false);
+        bool         forceTearing();
+        bool         forceTearingSupported();
         void         updateSurfaceScaleTransformDetails();
         bool         updateTearing();
         uint16_t     isDSBlocked(bool full = false);
