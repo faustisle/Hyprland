@@ -35,7 +35,15 @@ bool COutputCommitCoordinator::asyncEnabled() const {
 }
 
 bool COutputCommitCoordinator::canBeginFrame() const {
-    return !m_pending.has_value();
+    if (!m_pending.has_value())
+        return true;
+
+    // Queued commits are handed to the backend at flip-done, so the next frame
+    // can be rendered while the current flip is still in flight. It is then
+    // submitted the instant that flip completes, instead of the compositor
+    // starting to render only after it. Keep at most one frame ahead so a slow
+    // GPU cannot pile up work.
+    return asyncEnabled() && !m_queued.has_value();
 }
 
 bool COutputCommitCoordinator::hasPendingCommit() const {
@@ -91,7 +99,36 @@ COutputCommitCoordinator::eSubmitResult COutputCommitCoordinator::submit(SFrame&
 
     const auto CAPS = m_monitor->m_output->commitCapabilities();
 
+    // Let the backend deliver frame events while a queued commit is in flight so
+    // we can render the next frame during the current one.
+    m_monitor->m_output->setPipelinedFrames(asyncEnabled());
+
     LOG(Log::TRACE, "COutputCommitCoordinator: submit() with caps={}", m_monitor->m_name, sc<uint32_t>(CAPS));
+
+    if (m_pending) {
+        // The backend refuses another commit until the current flip completes. A
+        // direct scanout locks the client buffer right after submit, which cannot
+        // be handed over from a later callback, so let it fail and compose.
+        if (frame.kind == FRAME_DIRECT_SCANOUT) {
+            LOG(Log::TRACE, "COutputCommitCoordinator: refusing direct scanout for {} while a flip is in flight", m_monitor->m_name);
+            PROTO::presentation->discardUntagged(m_monitor->m_self.lock());
+            return SUBMIT_FAILED;
+        }
+
+        LOG(Log::TRACE, "COutputCommitCoordinator: holding rendered frame for {} until the pending flip completes", m_monitor->m_name);
+        discardQueued();
+
+        // Retire the damage transaction now. The frame is already rendered, and a
+        // later frame cannot be queued before this one is submitted, so the ring
+        // keeps the right order and the next frame's buffer-age damage stays valid.
+        if (frame.damage) {
+            frame.damage->commit();
+            frame.damage.reset();
+        }
+
+        m_queued = std::move(frame);
+        return SUBMIT_DEFERRED;
+    }
 
     if (!canSubmitAsync(frame))
         return submitSynchronously(std::move(frame));
@@ -103,6 +140,9 @@ COutputCommitCoordinator::eSubmitResult COutputCommitCoordinator::submit(SFrame&
     if (!frame.tearing && !frame.vrr && (CAPS & Aquamarine::IOutput::AQ_OUTPUT_COMMIT_CAPABILITY_TIMED))
         options.targetPresentation = m_monitor->m_output->nextVBlank();
     options.lateCursor = m_monitor->m_output->hasCursorPlane() && (CAPS & Aquamarine::IOutput::AQ_OUTPUT_COMMIT_CAPABILITY_LATE_CURSOR);
+    // Torn frames are not paced to vblank, so there is nothing for the commit
+    // thread to time: hand the commit to KMS from this thread and skip the hop.
+    options.immediate = frame.tearing;
 
     const auto SUBMISSION = m_monitor->m_output->commitAsync(options);
     if (!SUBMISSION.id) {
@@ -218,11 +258,15 @@ void COutputCommitCoordinator::onPresented(uint64_t id, bool presented) {
     }
 
     m_pending.reset();
+    submitQueued();
     flushDeferredStateCommit();
 }
 
 void COutputCommitCoordinator::failed(SFrame&& frame, bool rollbackSwapchain) {
     LOG(Log::TRACE, "COutputCommitCoordinator: failed for {}", m_monitor->m_name);
+
+    // Anything rendered for after the failed frame is stale.
+    discardQueued();
 
     if (frame.damage)
         frame.damage->rollback();
@@ -269,6 +313,8 @@ void COutputCommitCoordinator::cancelPending() {
     m_stagedRender.reset();
     m_stateCommitPending = false;
 
+    discardQueued();
+
     if (!m_pending)
         return;
 
@@ -277,4 +323,24 @@ void COutputCommitCoordinator::cancelPending() {
     m_pending.reset();
     if (frame.damage)
         frame.damage->rollback();
+}
+
+void COutputCommitCoordinator::submitQueued() {
+    if (!m_queued)
+        return;
+
+    auto frame = std::move(*m_queued);
+    m_queued.reset();
+
+    // The flip that blocked this frame is done, so it can go to the backend now.
+    submit(std::move(frame));
+}
+
+void COutputCommitCoordinator::discardQueued() {
+    if (!m_queued)
+        return;
+
+    if (m_queued->damage)
+        m_queued->damage->rollback();
+    m_queued.reset();
 }

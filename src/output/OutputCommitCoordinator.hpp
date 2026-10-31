@@ -21,6 +21,9 @@ namespace Monitor {
             SUBMIT_FAILED = 0,
             SUBMIT_SYNCHRONOUS,
             SUBMIT_ASYNC,
+            // Rendered, but the backend already has a commit in flight. The frame
+            // is held and handed to the backend as soon as that flip completes.
+            SUBMIT_DEFERRED,
         };
 
         struct SFrame {
@@ -64,9 +67,12 @@ namespace Monitor {
         void                         failed(SFrame&& frame, bool rollbackSwapchain);
         void                         scheduleRecovery();
         void                         flushDeferredStateCommit();
+        void                         submitQueued();
+        void                         discardQueued();
 
         CMonitor*                    m_monitor = nullptr;
         std::optional<SFrame>        m_pending;
+        std::optional<SFrame>        m_queued;
         std::optional<SStagedRender> m_stagedRender;
         bool                         m_stateCommitPending = false;
     };

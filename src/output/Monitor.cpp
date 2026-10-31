@@ -2085,12 +2085,9 @@ bool CMonitor::attemptDirectScanout() {
 
     const auto params = PSURFACE->m_current.buffer->dmabuf();
 
-    // An asynchronous flip may not be supported for every scanout format.
-    // Fall back to composition if this buffer cannot be torn.
-    if (m_tearingState.activelyTearing && !m_output->supportsTearingFormat(params.format, params.modifier)) {
-        LOG(Log::TRACE, "attemptDirectScanout: buffer format {} (mod {}) doesn't support async flips", params.format, params.modifier);
-        return false;
-    }
+    // Don't block direct scanout for buffers that can't be flipped asynchronously:
+    // the backend transparently falls back to a synchronous flip for them, and
+    // compositing instead would cost far more than missing a tear.
 
     LOG(Log::TRACE, "attemptDirectScanout: surface {:x} passed, will attempt, buffer {} fmt: {} -> {} (mod {})", rc<uintptr_t>(PSURFACE.get()),
         rc<uintptr_t>(PSURFACE->m_current.buffer.m_buffer.get()), m_drmFormat, params.format, params.modifier);
@@ -2701,7 +2698,13 @@ bool CMonitorState::updateSwapchain() {
     // flip asynchronously. Recompose (and reallocate) when forced tearing is
     // toggled so we don't keep using, e.g., a CCS modifier that the DRM backend
     // has to present synchronously.
-    const bool TEARING = m_owner->forceTearingSupported();
+    //
+    // Deliberately not forceTearingSupported(): that depends on the current
+    // scanout format, which is transiently replaced while formats are tested.
+    // Keying the allocation on it reallocated the whole swapchain back and forth
+    // between CCS and non-CCS buffers. The allocator already drops modifiers
+    // that the output cannot flip asynchronously for the format being allocated.
+    const bool TEARING = m_owner->forceTearing() && m_owner->m_tearingState.canTear && m_owner->m_output->supportsTearing();
     const bool MATCHES = OPTIONS.format == m_owner->m_drmFormat && OPTIONS.scanout && OPTIONS.length == 3 && OPTIONS.size == MODE->pixelSize && OPTIONS.tearing == TEARING &&
         OPTIONS.scanoutOutput == m_owner->m_output;
 

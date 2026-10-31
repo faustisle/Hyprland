@@ -143,12 +143,33 @@ void CPointerManager::unlockSoftwareForMonitor(PHLMONITOR mon) {
 
 bool CPointerManager::softwareLockedFor(PHLMONITOR mon) {
     auto const state = stateFor(mon);
-    return state->softwareLocks > 0 || (state->hardwareFailed && hasCursor() && g_pHyprRenderer->shouldRenderCursor());
+    if (!state)
+        return false;
+
+    if (state->softwareLocks > 0)
+        return true;
+
+    if (!state->hardwareFailed && !mon->shouldUseSoftwareCursors())
+        return false;
+
+    if (!hasCursor() || !g_pHyprRenderer->shouldRenderCursor())
+        return false;
+
+    // A software cursor is only part of this monitor's frame if it is actually
+    // on this monitor. Cursors elsewhere in the layout must not force this
+    // output to composite (e.g. while a fullscreen game scans out directly).
+    return !getCursorBoxLogicalForMonitor(mon).intersection(CBox{{}, mon->m_size}).empty();
 }
 
 bool CPointerManager::hasVisibleHWCursor(PHLMONITOR pMonitor) {
     auto const state = stateFor(pMonitor);
-    return state->softwareLocks == 0 && !state->hardwareFailed && hasCursor() && g_pHyprRenderer->shouldRenderCursor();
+    if (!state)
+        return false;
+
+    // Only a cursor buffer that is actually programmed on this output's cursor
+    // plane affects atomic commits. A cursor that merely exists somewhere else
+    // in the layout does not.
+    return state->cursorFrontBuffer && g_pHyprRenderer->shouldRenderCursor();
 }
 
 void CPointerManager::refreshCursorBackend() {

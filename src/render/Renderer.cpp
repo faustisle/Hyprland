@@ -2320,7 +2320,10 @@ void IHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
     if (pMonitor->m_output->state->state().presentationMode != presentationMode)
         pMonitor->m_output->state->setPresentationMode(presentationMode);
 
-    if (canAttemptDirectScanout) {
+    // A commit already in flight cannot be followed by a direct scanout: the
+    // client buffer is locked right after submit and cannot be handed over from
+    // a later callback, so compose this frame and let the coordinator queue it.
+    if (canAttemptDirectScanout && !pMonitor->m_commitCoordinator->hasPendingCommit()) {
         handleFullscreenSettings(pMonitor);
         if (pMonitor->attemptDirectScanout()) {
             return;

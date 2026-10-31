@@ -1801,8 +1801,10 @@ void CWindow::commitWindow(bool initialCommit) {
     }
 
     // tearing: if solitary, redraw it. This still might be a single surface window
-    if (PMONITOR && PMONITOR->m_solitaryClient.lock() == m_self.lock() && canBeTorn() && PMONITOR->m_tearingState.canTear && wlSurface()->resource()->m_current.texture &&
-        HADDAMAGE) {
+    // Forced tearing applies to every window, not just ones that opted into the
+    // per-window tearing rule, so drive the same low-latency path for it.
+    if (PMONITOR && PMONITOR->m_solitaryClient.lock() == m_self.lock() && (canBeTorn() || PMONITOR->forceTearing()) && PMONITOR->m_tearingState.canTear &&
+        wlSurface()->resource()->m_current.texture && HADDAMAGE) {
 
         if (PMONITOR->m_tearingState.busy)
             PMONITOR->m_tearingState.frameScheduledWhileBusy = true;
