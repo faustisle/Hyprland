@@ -84,8 +84,17 @@ void CMonitorFrameScheduler::onPresented() {
 
 void CMonitorFrameScheduler::onFrame() {
     const auto PMONITOR = m_monitor.lock();
-    if (!PMONITOR || !canRender())
+    if (!PMONITOR)
         return;
+
+    if (!canRender()) {
+        // The backend still has a flip in flight. Remember that a frame was
+        // requested so its completion can reschedule us, instead of losing the
+        // wakeup and leaving the pending damage until the next input event.
+        if (PMONITOR->m_output && PMONITOR->m_output->pendingPageFlip())
+            PMONITOR->m_pendingFrame = true;
+        return;
+    }
 
     PMONITOR->recheckSolitary();
 
@@ -93,8 +102,7 @@ void CMonitorFrameScheduler::onFrame() {
 
     // Forced tearing renders every scheduled frame; it does not rely on a solitary
     // client or on the per-client tearing rule to request frames.
-    if (!PMONITOR->forceTearing() && PMONITOR->m_tearingState.activelyTearing &&
-        PMONITOR->m_solitaryClient.lock() /* can be invalidated by a recheck */) {
+    if (!PMONITOR->forceTearing() && PMONITOR->m_tearingState.activelyTearing && PMONITOR->m_solitaryClient.lock() /* can be invalidated by a recheck */) {
 
         if (!PMONITOR->m_tearingState.frameScheduledWhileBusy)
             return; // we did not schedule a frame yet to be displayed, but we are tearing. Why render?

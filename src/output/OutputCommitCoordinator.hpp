@@ -63,6 +63,7 @@ namespace Monitor {
       private:
         bool                         canSubmitAsync(const SFrame& frame) const;
         eSubmitResult                submitSynchronously(SFrame&& frame);
+        eSubmitResult                deferFrame(SFrame&& frame);
         void                         submitted(SFrame& frame, bool async);
         void                         failed(SFrame&& frame, bool rollbackSwapchain);
         void                         scheduleRecovery();

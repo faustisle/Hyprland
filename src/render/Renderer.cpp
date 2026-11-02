@@ -2304,8 +2304,10 @@ void IHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
 
     // needsFrame can be cleared by commits that didnt consume our damage like a
     // commit while a pageflip was in flight, so pending damage must keep the frame alive.
-    if (!pMonitor->m_output->needsFrame && pMonitor->m_forceFullFrames == 0 && !pMonitor->m_damage.hasChanged())
+    if (!pMonitor->m_output->needsFrame && pMonitor->m_forceFullFrames == 0 && !pMonitor->m_damage.hasChanged()) {
+        pMonitor->m_pendingFrame = false;
         return;
+    }
 
     if (!pMonitor->m_commitCoordinator->canBeginFrame()) {
         pMonitor->m_pendingFrame = true;

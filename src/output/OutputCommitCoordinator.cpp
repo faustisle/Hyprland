@@ -16,7 +16,8 @@
 using namespace Monitor;
 
 COutputCommitCoordinator::COutputCommitCoordinator(CMonitor* monitor) : m_monitor(monitor) {
-    ;
+    if (m_monitor && m_monitor->m_output)
+        m_monitor->m_output->setPipelinedFrames(false);
 }
 
 COutputCommitCoordinator::~COutputCommitCoordinator() {
@@ -35,19 +36,18 @@ bool COutputCommitCoordinator::asyncEnabled() const {
 }
 
 bool COutputCommitCoordinator::canBeginFrame() const {
-    if (!m_pending.has_value())
-        return true;
+    // Render only when KMS has room for another commit. Rendering ahead of the
+    // in-flight flip does not lower latency (the frame cannot be handed to the
+    // backend until the flip completes) and the backend refuses commits while a
+    // flip is armed, so it only burns GPU time and buffers.
+    if (m_monitor && m_monitor->m_output && m_monitor->m_output->pendingPageFlip())
+        return false;
 
-    // Queued commits are handed to the backend at flip-done, so the next frame
-    // can be rendered while the current flip is still in flight. It is then
-    // submitted the instant that flip completes, instead of the compositor
-    // starting to render only after it. Keep at most one frame ahead so a slow
-    // GPU cannot pile up work.
-    return asyncEnabled() && !m_queued.has_value();
+    return !m_pending.has_value();
 }
 
 bool COutputCommitCoordinator::hasPendingCommit() const {
-    return m_pending.has_value();
+    return m_pending.has_value() || (m_monitor && m_monitor->m_output && m_monitor->m_output->pendingPageFlip());
 }
 
 bool COutputCommitCoordinator::ownsCommit(uint64_t id) const {
@@ -59,7 +59,9 @@ bool COutputCommitCoordinator::shouldForwardCommitEvent() const {
 }
 
 bool COutputCommitCoordinator::deferStateCommit() {
-    if (!m_pending)
+    // KMS can only take one commit at a time. A state commit attempted while a
+    // flip is armed must wait for it, exactly like a rendered frame.
+    if (!m_pending && (!m_monitor || !m_monitor->m_output || !m_monitor->m_output->pendingPageFlip()))
         return false;
 
     m_stateCommitPending = true;
@@ -99,36 +101,27 @@ COutputCommitCoordinator::eSubmitResult COutputCommitCoordinator::submit(SFrame&
 
     const auto CAPS = m_monitor->m_output->commitCapabilities();
 
-    // Let the backend deliver frame events while a queued commit is in flight so
-    // we can render the next frame during the current one.
-    m_monitor->m_output->setPipelinedFrames(asyncEnabled());
-
     LOG(Log::TRACE, "COutputCommitCoordinator: submit() with caps={}", m_monitor->m_name, sc<uint32_t>(CAPS));
 
-    if (m_pending) {
-        // The backend refuses another commit until the current flip completes. A
-        // direct scanout locks the client buffer right after submit, which cannot
-        // be handed over from a later callback, so let it fail and compose.
+    // KMS refuses a second commit while a flip is armed. That is a deferral,
+    // not a failure: treating it as one (damageEntire + immediate retry) turns
+    // every frame into a full-screen recomposite storm until the flip lands.
+    if (m_pending || m_monitor->m_output->pendingPageFlip()) {
+        // A direct scanout locks the client buffer right after submit, which
+        // cannot be handed over from a later callback, so let it fail and
+        // compose instead.
         if (frame.kind == FRAME_DIRECT_SCANOUT) {
             LOG(Log::TRACE, "COutputCommitCoordinator: refusing direct scanout for {} while a flip is in flight", m_monitor->m_name);
             PROTO::presentation->discardUntagged(m_monitor->m_self.lock());
             return SUBMIT_FAILED;
         }
 
-        LOG(Log::TRACE, "COutputCommitCoordinator: holding rendered frame for {} until the pending flip completes", m_monitor->m_name);
-        discardQueued();
-
-        // Retire the damage transaction now. The frame is already rendered, and a
-        // later frame cannot be queued before this one is submitted, so the ring
-        // keeps the right order and the next frame's buffer-age damage stays valid.
-        if (frame.damage) {
-            frame.damage->commit();
-            frame.damage.reset();
-        }
-
-        m_queued = std::move(frame);
-        return SUBMIT_DEFERRED;
+        return deferFrame(std::move(frame));
     }
+
+    // Not busy anymore: a frame held from before is stale, the caller already
+    // has a newer render to hand over.
+    discardQueued();
 
     if (!canSubmitAsync(frame))
         return submitSynchronously(std::move(frame));
@@ -148,6 +141,8 @@ COutputCommitCoordinator::eSubmitResult COutputCommitCoordinator::submit(SFrame&
     if (!SUBMISSION.id) {
         if (SUBMISSION.error == ENOTSUP)
             return submitSynchronously(std::move(frame));
+        if (SUBMISSION.error == EBUSY)
+            return deferFrame(std::move(frame));
 
         LOG(Log::TRACE, "Async output commit for {} rejected: {}", m_monitor->m_name, strerror(SUBMISSION.error));
         PROTO::presentation->discardUntagged(m_monitor->m_self.lock());
@@ -166,8 +161,42 @@ COutputCommitCoordinator::eSubmitResult COutputCommitCoordinator::submit(SFrame&
     return SUBMIT_ASYNC;
 }
 
+COutputCommitCoordinator::eSubmitResult COutputCommitCoordinator::deferFrame(SFrame&& frame) {
+    LOG(Log::TRACE, "COutputCommitCoordinator: holding rendered frame for {} until the pending flip completes", m_monitor->m_name);
+    discardQueued();
+
+    // Retire the damage transaction now. The frame is already rendered, and a
+    // later frame cannot be queued before this one is submitted, so the ring
+    // keeps the right order and the next frame's buffer-age damage stays valid.
+    if (frame.damage) {
+        frame.damage->commit();
+        frame.damage.reset();
+    }
+
+    m_queued = std::move(frame);
+    return SUBMIT_DEFERRED;
+}
+
 COutputCommitCoordinator::eSubmitResult COutputCommitCoordinator::submitSynchronously(SFrame&& frame) {
+    // A synchronous commit cannot be queued in KMS either: it would bounce off
+    // the "page-flip is awaiting" check inside the backend. Hold the frame
+    // until the current flip completes instead of failing and re-damaging the
+    // whole output.
+    if (m_monitor->m_output->pendingPageFlip())
+        return deferFrame(std::move(frame));
+
     LOG(Log::TRACE, "COutputCommitCoordinator: submitting synchronously for {}", m_monitor->m_name);
+
+    // Synchronous commits are paced to vblank and report presentation on flip
+    // completion. Asking KMS for an async flip here would make the backend
+    // report the frame as presented before it actually completes, which would
+    // desynchronize the coordinator and defeat the pacing. Only do this for the
+    // async path's fallback: plain tearing (render:async_commit=0) still uses
+    // the async flip flag on its synchronous commit.
+    if (frame.tearing && asyncEnabled()) {
+        m_monitor->m_output->state->setPresentationMode(Aquamarine::AQ_OUTPUT_PRESENTATION_VSYNC);
+        frame.tearing = false;
+    }
 
     PROTO::presentation->tagQueued(m_monitor->m_self.lock(), 0, frame.tearing, frame.vrr);
 
@@ -243,23 +272,34 @@ void COutputCommitCoordinator::submitted(SFrame& frame, bool async) {
 }
 
 void COutputCommitCoordinator::onPresented(uint64_t id, bool presented) {
-    if (!ownsCommit(id))
-        return;
+    if (id) {
+        if (!ownsCommit(id))
+            return;
 
-    if (presented && m_pending->kind == FRAME_COMPOSED && Screenshare::mgr())
-        Screenshare::mgr()->onOutputCommit(m_monitor->m_self.lock(), m_pending->copyFBPrepared);
+        if (presented && m_pending->kind == FRAME_COMPOSED && Screenshare::mgr())
+            Screenshare::mgr()->onOutputCommit(m_monitor->m_self.lock(), m_pending->copyFBPrepared);
 
-    if (!presented) {
-        auto frame = std::move(*m_pending);
+        if (!presented) {
+            auto frame = std::move(*m_pending);
+            m_pending.reset();
+            failed(std::move(frame), false);
+            flushDeferredStateCommit();
+            return;
+        }
+
         m_pending.reset();
-        failed(std::move(frame), false);
-        flushDeferredStateCommit();
-        return;
-    }
+    } else if (!presented)
+        return; // synchronous commits do not report failure through the present event
 
-    m_pending.reset();
+    // A synchronous commit completed (commitID 0). It may have been holding
+    // back a rendered frame or a deferred state commit.
     submitQueued();
     flushDeferredStateCommit();
+
+    // canBeginFrame() may have latched a frame because the output was busy;
+    // render it now that KMS is free again.
+    if (m_monitor->m_pendingFrame)
+        m_monitor->scheduleFrame(Aquamarine::IOutput::AQ_SCHEDULE_RENDER_MONITOR);
 }
 
 void COutputCommitCoordinator::failed(SFrame&& frame, bool rollbackSwapchain) {
@@ -299,7 +339,7 @@ void COutputCommitCoordinator::scheduleRecovery() {
 }
 
 void COutputCommitCoordinator::flushDeferredStateCommit() {
-    if (!m_stateCommitPending || m_pending)
+    if (!m_stateCommitPending || m_pending || (m_monitor->m_output && m_monitor->m_output->pendingPageFlip()))
         return;
 
     m_stateCommitPending = false;
