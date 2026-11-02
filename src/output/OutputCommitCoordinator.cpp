@@ -187,17 +187,6 @@ COutputCommitCoordinator::eSubmitResult COutputCommitCoordinator::submitSynchron
 
     LOG(Log::TRACE, "COutputCommitCoordinator: submitting synchronously for {}", m_monitor->m_name);
 
-    // Synchronous commits are paced to vblank and report presentation on flip
-    // completion. Asking KMS for an async flip here would make the backend
-    // report the frame as presented before it actually completes, which would
-    // desynchronize the coordinator and defeat the pacing. Only do this for the
-    // async path's fallback: plain tearing (render:async_commit=0) still uses
-    // the async flip flag on its synchronous commit.
-    if (frame.tearing && asyncEnabled()) {
-        m_monitor->m_output->state->setPresentationMode(Aquamarine::AQ_OUTPUT_PRESENTATION_VSYNC);
-        frame.tearing = false;
-    }
-
     PROTO::presentation->tagQueued(m_monitor->m_self.lock(), 0, frame.tearing, frame.vrr);
 
     bool ok = frame.kind == FRAME_DIRECT_SCANOUT ? m_monitor->m_output->commit() : m_monitor->m_state.commit();
