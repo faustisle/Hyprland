@@ -79,26 +79,33 @@ namespace Monitor {
         void          discardQueued();
         void          noteSubmitStats(eSubmitResult result, bool tearing, uint64_t renderUs);
         void          logStatsIfDue();
+        bool          statsEnabled();
 
         // Per-monitor frame statistics, printed once a second when
-        // HYPRLAND_TEARING_STATS is set. Used to tell "we are slow" apart from
-        // "we are being paced to vblank" without a profiler.
+        // HYPRLAND_TEARING_STATS is set or forced tearing is active. Used to
+        // tell "we are slow" apart from "we are being paced to vblank" without
+        // a profiler.
         struct SStats {
             uint64_t async = 0, sync = 0, deferred = 0, failed = 0;
             uint64_t renderUsSum = 0, renderUsMax = 0, submitted = 0;
             uint64_t presentUsSum = 0, presentUsMax = 0, presented = 0;
+            // Time spent between the previous present and the next submit: the
+            // part of the frame interval the compositor did not account for.
+            uint64_t idleUsSum = 0, idleUsMax = 0, idle = 0;
             // Backend-side counter of commits that wanted an async flip and had
             // to give it up, sampled once per window.
             uint64_t                              lastAsyncDrops = 0;
             std::chrono::steady_clock::time_point windowStart;
         };
 
-        CMonitor*                    m_monitor = nullptr;
-        std::optional<SFrame>        m_pending;
-        std::optional<SFrame>        m_queued;
-        std::optional<SStagedRender> m_stagedRender;
-        bool                         m_stateCommitPending = false;
-        uint64_t                     m_lastRenderUs       = 0;
-        SStats                       m_stats;
+        CMonitor*                             m_monitor = nullptr;
+        std::optional<SFrame>                 m_pending;
+        std::optional<SFrame>                 m_queued;
+        std::optional<SStagedRender>          m_stagedRender;
+        bool                                  m_stateCommitPending = false;
+        uint64_t                              m_lastRenderUs       = 0;
+        SStats                                m_stats;
+        std::chrono::steady_clock::time_point m_lastPresentTime;
+        bool                                  m_havePresentTime = false;
     };
 }

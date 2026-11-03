@@ -17,11 +17,12 @@
 
 using namespace Monitor;
 
-// Opt-in latency diagnostics: HYPRLAND_TEARING_STATS=1 prints one line per second
-// with render cost, submit mix and flip latency for every output.
-static bool tearingStatsEnabled() {
+// Latency diagnostics: prints one line per second with render cost, submit mix,
+// flip latency and idle time for every output. Always on for forced tearing
+// (where the numbers matter), opt-in otherwise.
+bool COutputCommitCoordinator::statsEnabled() {
     static const bool ENABLED = getenv("HYPRLAND_TEARING_STATS") != nullptr;
-    return ENABLED;
+    return ENABLED || (m_monitor && m_monitor->forceTearing());
 }
 
 static uint64_t usSince(const std::chrono::steady_clock::time_point& from, const std::chrono::steady_clock::time_point& to) {
@@ -121,9 +122,16 @@ COutputCommitCoordinator::eSubmitResult COutputCommitCoordinator::submit(SFrame&
     const bool     TEARING   = frame.tearing;
     const uint64_t RENDER_US = frame.renderUs;
 
-    const auto     RESULT = submitFrame(std::move(frame));
+    if (m_havePresentTime) {
+        const uint64_t IDLE_US = usSince(m_lastPresentTime, frame.submitTime);
+        m_stats.idleUsSum += IDLE_US;
+        m_stats.idleUsMax = std::max(m_stats.idleUsMax, IDLE_US);
+        ++m_stats.idle;
+    }
 
-    if (tearingStatsEnabled()) {
+    const auto RESULT = submitFrame(std::move(frame));
+
+    if (statsEnabled()) {
         noteSubmitStats(RESULT, TEARING, RENDER_US);
         logStatsIfDue();
     }
@@ -315,7 +323,7 @@ void COutputCommitCoordinator::noteSubmitStats(eSubmitResult result, bool tearin
 }
 
 void COutputCommitCoordinator::logStatsIfDue() {
-    if (!tearingStatsEnabled() || !m_monitor)
+    if (!statsEnabled() || !m_monitor)
         return;
 
     const auto NOW = std::chrono::steady_clock::now();
@@ -334,10 +342,12 @@ void COutputCommitCoordinator::logStatsIfDue() {
     const uint64_t DROPS   = m_monitor->m_output ? m_monitor->m_output->asyncFlipDrops() : 0;
     const uint64_t DROPPED = DROPS - m_stats.lastAsyncDrops;
 
-    LOG(Log::INFO, "tearing stats {}: {:.1f} fps | async {} sync {} deferred {} failed {} | dropped {} | render avg {}us max {}us | flip avg {}us max {}us | tearing {} pmode {}",
+    LOG(Log::INFO,
+        "tearing stats {}: {:.1f} fps | async {} sync {} deferred {} failed {} | dropped {} | render avg {}us max {}us | flip avg {}us max {}us | idle avg {}us max {}us | tearing "
+        "{} pmode {}",
         m_monitor->m_name, TOTAL / SECS, m_stats.async, m_stats.sync, m_stats.deferred, m_stats.failed, DROPPED, m_stats.submitted ? m_stats.renderUsSum / m_stats.submitted : 0,
-        m_stats.renderUsMax, m_stats.presented ? m_stats.presentUsSum / m_stats.presented : 0, m_stats.presentUsMax, m_monitor->m_tearingState.activelyTearing,
-        m_monitor->m_output ? sc<uint32_t>(m_monitor->m_output->state->state().presentationMode) : 0);
+        m_stats.renderUsMax, m_stats.presented ? m_stats.presentUsSum / m_stats.presented : 0, m_stats.presentUsMax, m_stats.idle ? m_stats.idleUsSum / m_stats.idle : 0,
+        m_stats.idleUsMax, m_monitor->m_tearingState.activelyTearing, m_monitor->m_output ? sc<uint32_t>(m_monitor->m_output->state->state().presentationMode) : 0);
 
     m_stats                = SStats{};
     m_stats.lastAsyncDrops = DROPS;
@@ -345,6 +355,8 @@ void COutputCommitCoordinator::logStatsIfDue() {
 }
 
 void COutputCommitCoordinator::onPresented(uint64_t id, bool presented) {
+    bool presentedNow = false;
+
     if (id) {
         if (!ownsCommit(id))
             return;
@@ -352,11 +364,12 @@ void COutputCommitCoordinator::onPresented(uint64_t id, bool presented) {
         if (presented && m_pending->kind == FRAME_COMPOSED && Screenshare::mgr())
             Screenshare::mgr()->onOutputCommit(m_monitor->m_self.lock(), m_pending->copyFBPrepared);
 
-        if (presented && tearingStatsEnabled()) {
+        if (presented && statsEnabled()) {
             const auto US = usSince(m_pending->submitTime, std::chrono::steady_clock::now());
             m_stats.presentUsSum += US;
             m_stats.presentUsMax = std::max(m_stats.presentUsMax, US);
             ++m_stats.presented;
+            presentedNow = true;
         }
 
         if (!presented) {
@@ -370,6 +383,8 @@ void COutputCommitCoordinator::onPresented(uint64_t id, bool presented) {
         m_pending.reset();
     } else if (!presented)
         return; // synchronous commits do not report failure through the present event
+    else
+        presentedNow = true; // commitID 0: a synchronous commit completed
 
     // A synchronous commit completed (commitID 0). It may have been holding
     // back a rendered frame or a deferred state commit.
@@ -380,6 +395,14 @@ void COutputCommitCoordinator::onPresented(uint64_t id, bool presented) {
     // render it now that KMS is free again.
     if (m_monitor->m_pendingFrame)
         m_monitor->scheduleFrame(Aquamarine::IOutput::AQ_SCHEDULE_RENDER_MONITOR);
+
+    // Measured after the deferred frame is handed over, so the idle metric is
+    // "how long did the compositor wait after the last present", not "how long
+    // the queue hop took".
+    if (presentedNow) {
+        m_lastPresentTime = std::chrono::steady_clock::now();
+        m_havePresentTime = true;
+    }
 
     logStatsIfDue();
 }
