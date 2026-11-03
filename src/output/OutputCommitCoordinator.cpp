@@ -11,9 +11,22 @@
 
 #include <cerrno>
 #include <cstring>
+#include <cstdlib>
+#include <algorithm>
 #include <utility>
 
 using namespace Monitor;
+
+// Opt-in latency diagnostics: HYPRLAND_TEARING_STATS=1 prints one line per second
+// with render cost, submit mix and flip latency for every output.
+static bool tearingStatsEnabled() {
+    static const bool ENABLED = getenv("HYPRLAND_TEARING_STATS") != nullptr;
+    return ENABLED;
+}
+
+static uint64_t usSince(const std::chrono::steady_clock::time_point& from, const std::chrono::steady_clock::time_point& to) {
+    return std::chrono::duration_cast<std::chrono::microseconds>(to - from).count();
+}
 
 COutputCommitCoordinator::COutputCommitCoordinator(CMonitor* monitor) : m_monitor(monitor) {
     if (m_monitor && m_monitor->m_output)
@@ -79,6 +92,10 @@ std::optional<COutputCommitCoordinator::SStagedRender> COutputCommitCoordinator:
     return std::exchange(m_stagedRender, std::nullopt);
 }
 
+void COutputCommitCoordinator::setLastRenderDuration(uint64_t us) {
+    m_lastRenderUs = us;
+}
+
 bool COutputCommitCoordinator::canSubmitAsync(const SFrame& frame) const {
     if (!asyncEnabled() || m_pending)
         return false;
@@ -93,6 +110,28 @@ bool COutputCommitCoordinator::canSubmitAsync(const SFrame& frame) const {
 }
 
 COutputCommitCoordinator::eSubmitResult COutputCommitCoordinator::submit(SFrame&& frame) {
+    // Deferred frames are re-submitted here, so only take the render duration
+    // once; refresh the submit time, that is what the flip latency is measured
+    // from.
+    if (m_lastRenderUs) {
+        frame.renderUs = std::exchange(m_lastRenderUs, 0);
+    }
+    frame.submitTime = std::chrono::steady_clock::now();
+
+    const bool     TEARING   = frame.tearing;
+    const uint64_t RENDER_US = frame.renderUs;
+
+    const auto     RESULT = submitFrame(std::move(frame));
+
+    if (tearingStatsEnabled()) {
+        noteSubmitStats(RESULT, TEARING, RENDER_US);
+        logStatsIfDue();
+    }
+
+    return RESULT;
+}
+
+COutputCommitCoordinator::eSubmitResult COutputCommitCoordinator::submitFrame(SFrame&& frame) {
     if (!m_monitor || !m_monitor->m_output) {
         if (m_monitor)
             PROTO::presentation->discardUntagged(m_monitor->m_self.lock());
@@ -260,6 +299,47 @@ void COutputCommitCoordinator::submitted(SFrame& frame, bool async) {
         Screenshare::mgr()->onOutputCommit(m_monitor->m_self.lock(), frame.copyFBPrepared);
 }
 
+void COutputCommitCoordinator::noteSubmitStats(eSubmitResult result, bool tearing, uint64_t renderUs) {
+    if (renderUs) {
+        m_stats.renderUsSum += renderUs;
+        m_stats.renderUsMax = std::max(m_stats.renderUsMax, renderUs);
+        ++m_stats.submitted;
+    }
+
+    switch (result) {
+        case SUBMIT_ASYNC: ++m_stats.async; break;
+        case SUBMIT_SYNCHRONOUS: ++m_stats.sync; break;
+        case SUBMIT_DEFERRED: ++m_stats.deferred; break;
+        default: ++m_stats.failed; break;
+    }
+}
+
+void COutputCommitCoordinator::logStatsIfDue() {
+    if (!tearingStatsEnabled() || !m_monitor)
+        return;
+
+    const auto NOW = std::chrono::steady_clock::now();
+    if (m_stats.windowStart.time_since_epoch().count() == 0) {
+        m_stats.windowStart = NOW;
+        return;
+    }
+
+    const auto ELAPSED = usSince(m_stats.windowStart, NOW);
+    if (ELAPSED < 1000000)
+        return;
+
+    const uint64_t TOTAL = m_stats.async + m_stats.sync + m_stats.deferred + m_stats.failed;
+    const double   SECS  = ELAPSED / 1000000.0;
+
+    LOG(Log::INFO, "tearing stats {}: {:.1f} fps | async {} sync {} deferred {} failed {} | render avg {}us max {}us | flip avg {}us max {}us | tearing {} pmode {}",
+        m_monitor->m_name, TOTAL / SECS, m_stats.async, m_stats.sync, m_stats.deferred, m_stats.failed, m_stats.submitted ? m_stats.renderUsSum / m_stats.submitted : 0,
+        m_stats.renderUsMax, m_stats.presented ? m_stats.presentUsSum / m_stats.presented : 0, m_stats.presentUsMax, m_monitor->m_tearingState.activelyTearing,
+        m_monitor->m_output ? sc<uint32_t>(m_monitor->m_output->state->state().presentationMode) : 0);
+
+    m_stats             = SStats{};
+    m_stats.windowStart = NOW;
+}
+
 void COutputCommitCoordinator::onPresented(uint64_t id, bool presented) {
     if (id) {
         if (!ownsCommit(id))
@@ -267,6 +347,13 @@ void COutputCommitCoordinator::onPresented(uint64_t id, bool presented) {
 
         if (presented && m_pending->kind == FRAME_COMPOSED && Screenshare::mgr())
             Screenshare::mgr()->onOutputCommit(m_monitor->m_self.lock(), m_pending->copyFBPrepared);
+
+        if (presented && tearingStatsEnabled()) {
+            const auto US = usSince(m_pending->submitTime, std::chrono::steady_clock::now());
+            m_stats.presentUsSum += US;
+            m_stats.presentUsMax = std::max(m_stats.presentUsMax, US);
+            ++m_stats.presented;
+        }
 
         if (!presented) {
             auto frame = std::move(*m_pending);
@@ -289,6 +376,8 @@ void COutputCommitCoordinator::onPresented(uint64_t id, bool presented) {
     // render it now that KMS is free again.
     if (m_monitor->m_pendingFrame)
         m_monitor->scheduleFrame(Aquamarine::IOutput::AQ_SCHEDULE_RENDER_MONITOR);
+
+    logStatsIfDue();
 }
 
 void COutputCommitCoordinator::failed(SFrame&& frame, bool rollbackSwapchain) {

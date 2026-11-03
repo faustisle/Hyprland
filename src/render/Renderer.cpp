@@ -2314,6 +2314,10 @@ void IHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
         return;
     }
 
+    // Frame production cost, reported by the commit coordinator when
+    // HYPRLAND_TEARING_STATS is set.
+    const auto FRAME_START = Time::steadyNow();
+
     // tearing and DS first
     bool       shouldTear              = pMonitor->updateTearing();
     const bool canAttemptDirectScanout = pMonitor->canAttemptDirectScanoutFast();
@@ -2473,6 +2477,9 @@ void IHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
 
     finishing               = true;
     const auto renderResult = endRender();
+
+    if (commit)
+        pMonitor->m_commitCoordinator->setLastRenderDuration(std::chrono::duration_cast<std::chrono::microseconds>(Time::steadyNow() - FRAME_START).count());
 
     TRACY_GPU_COLLECT;
 

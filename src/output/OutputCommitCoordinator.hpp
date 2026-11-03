@@ -6,6 +6,7 @@
 
 #include <aquamarine/output/Output.hpp>
 #include <optional>
+#include <chrono>
 
 namespace Monitor {
     class CMonitor;
@@ -37,6 +38,10 @@ namespace Monitor {
             bool                                     copyFBPrepared    = false;
             std::optional<uint32_t>                  previousFormat;
             uint64_t                                 id = 0;
+            // Latency diagnostics. submitTime is taken when the frame is handed
+            // to the backend, renderUs is how long producing it took.
+            std::chrono::steady_clock::time_point submitTime{};
+            uint64_t                              renderUs = 0;
         };
 
         struct SStagedRender {
@@ -55,26 +60,42 @@ namespace Monitor {
         bool                         deferStateCommit();
         void                         stageRenderedDamage(const CRegion& damage, bool copyFBPrepared);
         std::optional<SStagedRender> takeStagedRender();
+        void                         setLastRenderDuration(uint64_t us);
         eSubmitResult                submit(SFrame&& frame);
         void                         onCommitResult(const Aquamarine::IOutput::SCommitResult& result);
         void                         onPresented(uint64_t id, bool presented);
         void                         cancelPending();
 
       private:
-        bool                         canSubmitAsync(const SFrame& frame) const;
-        eSubmitResult                submitSynchronously(SFrame&& frame);
-        eSubmitResult                deferFrame(SFrame&& frame);
-        void                         submitted(SFrame& frame, bool async);
-        void                         failed(SFrame&& frame, bool rollbackSwapchain);
-        void                         scheduleRecovery();
-        void                         flushDeferredStateCommit();
-        void                         submitQueued();
-        void                         discardQueued();
+        bool          canSubmitAsync(const SFrame& frame) const;
+        eSubmitResult submitSynchronously(SFrame&& frame);
+        eSubmitResult submitFrame(SFrame&& frame);
+        eSubmitResult deferFrame(SFrame&& frame);
+        void          submitted(SFrame& frame, bool async);
+        void          failed(SFrame&& frame, bool rollbackSwapchain);
+        void          scheduleRecovery();
+        void          flushDeferredStateCommit();
+        void          submitQueued();
+        void          discardQueued();
+        void          noteSubmitStats(eSubmitResult result, bool tearing, uint64_t renderUs);
+        void          logStatsIfDue();
+
+        // Per-monitor frame statistics, printed once a second when
+        // HYPRLAND_TEARING_STATS is set. Used to tell "we are slow" apart from
+        // "we are being paced to vblank" without a profiler.
+        struct SStats {
+            uint64_t                              async = 0, sync = 0, deferred = 0, failed = 0;
+            uint64_t                              renderUsSum = 0, renderUsMax = 0, submitted = 0;
+            uint64_t                              presentUsSum = 0, presentUsMax = 0, presented = 0;
+            std::chrono::steady_clock::time_point windowStart;
+        };
 
         CMonitor*                    m_monitor = nullptr;
         std::optional<SFrame>        m_pending;
         std::optional<SFrame>        m_queued;
         std::optional<SStagedRender> m_stagedRender;
         bool                         m_stateCommitPending = false;
+        uint64_t                     m_lastRenderUs       = 0;
+        SStats                       m_stats;
     };
 }
