@@ -84,9 +84,12 @@ namespace Monitor {
         // HYPRLAND_TEARING_STATS is set. Used to tell "we are slow" apart from
         // "we are being paced to vblank" without a profiler.
         struct SStats {
-            uint64_t                              async = 0, sync = 0, deferred = 0, failed = 0;
-            uint64_t                              renderUsSum = 0, renderUsMax = 0, submitted = 0;
-            uint64_t                              presentUsSum = 0, presentUsMax = 0, presented = 0;
+            uint64_t async = 0, sync = 0, deferred = 0, failed = 0;
+            uint64_t renderUsSum = 0, renderUsMax = 0, submitted = 0;
+            uint64_t presentUsSum = 0, presentUsMax = 0, presented = 0;
+            // Backend-side counter of commits that wanted an async flip and had
+            // to give it up, sampled once per window.
+            uint64_t                              lastAsyncDrops = 0;
             std::chrono::steady_clock::time_point windowStart;
         };
 

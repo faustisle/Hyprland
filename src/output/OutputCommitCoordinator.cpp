@@ -331,13 +331,17 @@ void COutputCommitCoordinator::logStatsIfDue() {
     const uint64_t TOTAL = m_stats.async + m_stats.sync + m_stats.deferred + m_stats.failed;
     const double   SECS  = ELAPSED / 1000000.0;
 
-    LOG(Log::INFO, "tearing stats {}: {:.1f} fps | async {} sync {} deferred {} failed {} | render avg {}us max {}us | flip avg {}us max {}us | tearing {} pmode {}",
-        m_monitor->m_name, TOTAL / SECS, m_stats.async, m_stats.sync, m_stats.deferred, m_stats.failed, m_stats.submitted ? m_stats.renderUsSum / m_stats.submitted : 0,
+    const uint64_t DROPS   = m_monitor->m_output ? m_monitor->m_output->asyncFlipDrops() : 0;
+    const uint64_t DROPPED = DROPS - m_stats.lastAsyncDrops;
+
+    LOG(Log::INFO, "tearing stats {}: {:.1f} fps | async {} sync {} deferred {} failed {} | dropped {} | render avg {}us max {}us | flip avg {}us max {}us | tearing {} pmode {}",
+        m_monitor->m_name, TOTAL / SECS, m_stats.async, m_stats.sync, m_stats.deferred, m_stats.failed, DROPPED, m_stats.submitted ? m_stats.renderUsSum / m_stats.submitted : 0,
         m_stats.renderUsMax, m_stats.presented ? m_stats.presentUsSum / m_stats.presented : 0, m_stats.presentUsMax, m_monitor->m_tearingState.activelyTearing,
         m_monitor->m_output ? sc<uint32_t>(m_monitor->m_output->state->state().presentationMode) : 0);
 
-    m_stats             = SStats{};
-    m_stats.windowStart = NOW;
+    m_stats                = SStats{};
+    m_stats.lastAsyncDrops = DROPS;
+    m_stats.windowStart    = NOW;
 }
 
 void COutputCommitCoordinator::onPresented(uint64_t id, bool presented) {
