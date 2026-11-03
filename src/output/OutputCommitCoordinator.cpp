@@ -12,6 +12,7 @@
 #include <cerrno>
 #include <cstring>
 #include <cstdlib>
+#include <format>
 #include <algorithm>
 #include <utility>
 
@@ -342,12 +343,18 @@ void COutputCommitCoordinator::logStatsIfDue() {
     const uint64_t DROPS   = m_monitor->m_output ? m_monitor->m_output->asyncFlipDrops() : 0;
     const uint64_t DROPPED = DROPS - m_stats.lastAsyncDrops;
 
-    LOG(Log::INFO,
-        "tearing stats {}: {:.1f} fps | async {} sync {} deferred {} failed {} | dropped {} | render avg {}us max {}us | flip avg {}us max {}us | idle avg {}us max {}us | tearing "
-        "{} pmode {}",
-        m_monitor->m_name, TOTAL / SECS, m_stats.async, m_stats.sync, m_stats.deferred, m_stats.failed, DROPPED, m_stats.submitted ? m_stats.renderUsSum / m_stats.submitted : 0,
-        m_stats.renderUsMax, m_stats.presented ? m_stats.presentUsSum / m_stats.presented : 0, m_stats.presentUsMax, m_stats.idle ? m_stats.idleUsSum / m_stats.idle : 0,
-        m_stats.idleUsMax, m_monitor->m_tearingState.activelyTearing, m_monitor->m_output ? sc<uint32_t>(m_monitor->m_output->state->state().presentationMode) : 0);
+    // Emitted through the hyprutils logger rather than LOG(): this fork defaults
+    // debug:disable_logs to true, which silences every Hyprland-side log line
+    // (device-side connections like aquamarine bypass it). These numbers are the
+    // entire point of the diagnostic, so they must not depend on a config flag.
+    Log::logger->hu().log(
+        Hyprutils::CLI::LOG_DEBUG,
+        std::format("[{}] tearing stats {}: {:.1f} fps | async {} sync {} deferred {} failed {} | dropped {} | render avg {}us max {}us | flip avg {}us max {}us | "
+                    "idle avg {}us max {}us | tearing {} pmode {}",
+                    Log::logFnName(), m_monitor->m_name, TOTAL / SECS, m_stats.async, m_stats.sync, m_stats.deferred, m_stats.failed, DROPPED,
+                    m_stats.submitted ? m_stats.renderUsSum / m_stats.submitted : 0, m_stats.renderUsMax, m_stats.presented ? m_stats.presentUsSum / m_stats.presented : 0,
+                    m_stats.presentUsMax, m_stats.idle ? m_stats.idleUsSum / m_stats.idle : 0, m_stats.idleUsMax, m_monitor->m_tearingState.activelyTearing,
+                    m_monitor->m_output ? sc<uint32_t>(m_monitor->m_output->state->state().presentationMode) : 0));
 
     m_stats                = SStats{};
     m_stats.lastAsyncDrops = DROPS;
