@@ -369,7 +369,7 @@ std::vector<SP<IValue>> Values::getConfigValues() {
         MS<Float>("input:sensitivity", "Sets the mouse input sensitivity. Value is clamped to the range -1.0 to 1.0.", 0,
                   {.min = -1, .max = 1, .refresh = Supplementary::REFRESH_INPUT_DEVICES}),
         MS<String>("input:accel_profile", "Sets the cursor acceleration profile. [adaptive/flat/custom]", STRVAL_EMPTY,
-                   {.validator = strChoice({"adaptive", "flat", "custom"}), .refresh = Supplementary::REFRESH_INPUT_DEVICES}),
+                   {.validator = strChoice({"adaptive", "flat", "custom*"}), .refresh = Supplementary::REFRESH_INPUT_DEVICES}),
         MS<Bool>("input:force_no_accel", "Force no cursor acceleration.", false, {.refresh = Supplementary::REFRESH_INPUT_DEVICES}),
         MS<Int>("input:rotation", "Sets the rotation of a device in degrees clockwise. Value is clamped to the range 0 to 359.", 0,
                 {.min = 0, .max = 359, .refresh = Supplementary::REFRESH_INPUT_DEVICES}),
@@ -453,17 +453,17 @@ std::vector<SP<IValue>> Values::getConfigValues() {
         MS<Int>("input:tablet:transform", "transform the input from tablets.", 0, {.min = 0, .max = 6, .refresh = Supplementary::REFRESH_INPUT_DEVICES}),
         MS<String>("input:tablet:output", "the monitor to bind tablets.", STRVAL_EMPTY, {.refresh = Supplementary::REFRESH_INPUT_DEVICES}),
         MS<Vec2>("input:tablet:region_position", "position of the mapped region in monitor layout.", Config::VEC2{},
-                 {.validator = vec2Range(-20000, -20000, 20000, 20000), .refresh = Supplementary::REFRESH_INPUT_DEVICES}),
+                 {.validator = vec2Range(-100000, -100000, 100000, 100000), .refresh = Supplementary::REFRESH_INPUT_DEVICES}),
         MS<Bool>("input:tablet:absolute_region_position", "whether to treat the region_position as an absolute position in monitor layout.", false,
                  {.refresh = Supplementary::REFRESH_INPUT_DEVICES}),
         MS<Vec2>("input:tablet:region_size", "size of the mapped region.", Config::VEC2{},
-                 {.validator = vec2Range(-100, -100, 4000, 4000), .refresh = Supplementary::REFRESH_INPUT_DEVICES}),
+                 {.validator = vec2Range(1, 1, 100000, 100000), .refresh = Supplementary::REFRESH_INPUT_DEVICES}),
         MS<Bool>("input:tablet:relative_input", "whether the input should be relative", false, {.refresh = Supplementary::REFRESH_INPUT_DEVICES}),
         MS<Bool>("input:tablet:left_handed", "if enabled, the tablet will be rotated 180 degrees", false, {.refresh = Supplementary::REFRESH_INPUT_DEVICES}),
         MS<Vec2>("input:tablet:active_area_size", "size of tablet's active area in mm", Config::VEC2{},
-                 {.validator = vec2Range(0, 0, 500, 500), .refresh = Supplementary::REFRESH_INPUT_DEVICES}),
+                 {.validator = vec2Range(0, 0, 5000, 5000), .refresh = Supplementary::REFRESH_INPUT_DEVICES}),
         MS<Vec2>("input:tablet:active_area_position", "position of the active area in mm", Config::VEC2{},
-                 {.validator = vec2Range(0, 0, 500, 500), .refresh = Supplementary::REFRESH_INPUT_DEVICES}),
+                 {.validator = vec2Range(0, 0, 5000, 5000), .refresh = Supplementary::REFRESH_INPUT_DEVICES}),
 
         /*
          * input:tablettool:
@@ -851,7 +851,7 @@ std::vector<SP<IValue>> Values::getConfigValues() {
          */
 
         MS<Int>("quirks:prefer_hdr", "Prefer HDR mode.", 0, {.min = 0, .max = 2, .map = OptionMap{{"disable", 0}, {"enable", 1}, {"gamescope_only", 2}}}),
-        MS<Bool>("quirks:skip_non_kms_dmabuf_formats", "Do not report dmabuf formats which cannot be imported into KMS", true),
+        MS<Bool>("quirks:skip_non_kms_dmabuf_formats", "Do not report dmabuf formats which cannot be imported into KMS", false),
     };
 
 #undef MS

@@ -97,6 +97,9 @@ TEST_CASE(luaDevicesEnumerationAndHyprctlParity) {
             assert(type(index) == 'number' and index % 1 == 0 and index >= 1 and index <= #devices)
             assert(type(device) == 'userdata' and types[device.type])
             assert(type(device.address) == 'string' and device.address:match('^0x%x+$'))
+            if device.type == 'pointer' or device.type == 'keyboard' or device.type == 'tablet' or device.type == 'tablet_pad' or device.type == 'touch' then
+                assert(type(device.sysname) == 'string')
+            end
             assert(not byAddress[device.address], 'duplicate device address')
             byAddress[device.address] = device
             count = count + 1
@@ -227,6 +230,60 @@ static bool waitForRepl(std::string_view expr, std::string_view expected) {
     }
 
     return false;
+}
+
+TEST_CASE(luaWindowDestroyWeakAccess) {
+    CScopeGuard guard = {[&]() {
+        getFromSocket(R"(/eval do
+            local state = _G.hyprtester_window_destroy
+            if state and state.subscription then state.subscription:remove() end
+            _G.hyprtester_window_destroy = nil
+        end)");
+    }};
+
+    SPAWN_KITTY("kitty_lua_destroy", {"--title", "lua_destroy_title", "-o", "confirm_os_window_close=0"});
+    OK(getFromSocket(R"(/eval do
+        local original = assert(hl.get_window('class:^kitty_lua_destroy$'))
+        assert(original.class == 'kitty_lua_destroy' and original.title == 'lua_destroy_title')
+        assert(type(original.address) == 'string' and original.address:match('^0x%x+$'))
+        assert(type(original.stable_id) == 'string' and original.stable_id:match('^%x+$'))
+        local state = { original = original, count = 0, description = tostring(original), expected = {
+            address = original.address, stable_id = original.stable_id, title = original.title, class = original.class,
+        } }
+        _G.hyprtester_window_destroy = state
+        state.subscription = hl.on('window.destroy', function(window)
+            state.count = state.count + 1
+            state.saved = window
+            state.ok, state.error = pcall(function()
+                assert(type(window) == 'userdata')
+                assert(window == original)
+                for field, value in pairs(state.expected) do
+                    assert(window[field] == value, field)
+                    assert(original[field] == value, field)
+                end
+                assert(tostring(window) == state.description)
+                assert(not tostring(window):find('expired', 1, true))
+                for _, field in ipairs({ 'fullscreen', 'fullscreen_client', 'fullscreen_handler', 'inhibiting_idle', 'layout' }) do
+                    assert(window[field] == nil, field)
+                end
+            end)
+        end)
+    end)"));
+
+    OK(getFromSocket("/dispatch hl.dsp.window.close({ window = 'class:^kitty_lua_destroy$' })"));
+    ASSERT(waitForRepl("_G.hyprtester_window_destroy.count > 0", "true"), true);
+    OK(getFromSocket(R"(/eval do
+        local state = _G.hyprtester_window_destroy
+        assert(state.count == 1)
+        assert(state.ok, state.error)
+        assert(state.saved == state.original)
+        for field in pairs(state.expected) do
+            assert(state.saved[field] == nil, field)
+            assert(state.original[field] == nil, field)
+        end
+        assert(tostring(state.saved) == 'HL.Window(expired)')
+        assert(tostring(state.original) == 'HL.Window(expired)')
+    end)"));
 }
 
 TEST_CASE(luaRefBindReleasedOnUnbind) {

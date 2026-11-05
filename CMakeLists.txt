@@ -376,13 +376,8 @@ if(NOT HAS_INOTIFY AND inotify_FOUND)
   target_link_libraries(hyprland_lib PUBLIC PkgConfig::inotify)
 endif()
 
-# sdbus-c++ is used to ask rtkit for realtime scheduling which is Linux-only
-if(NO_RTKIT OR NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  message(STATUS "rtkit realtime scheduling is disabled!")
-else()
-  pkg_check_modules(sdbus_dep REQUIRED IMPORTED_TARGET sdbus-c++>=2.0.0)
-  target_link_libraries(hyprland_lib PUBLIC PkgConfig::sdbus_dep)
-  add_compile_definitions(HAS_RTKIT)
+if(DEFINED NO_RTKIT)
+  message(STATUS "NO_RTKIT=${NO_RTKIT} is obsolete: Hyprland no longer acquires realtime scheduling")
 endif()
 
 if(NO_XWAYLAND)
@@ -638,15 +633,21 @@ set(CMAKE_INSTALL_DEFAULT_DIRECTORY_PERMISSIONS
     GROUP_READ GROUP_EXECUTE
     WORLD_READ WORLD_EXECUTE)
 
-# binary and symlink
+# binary
 install(TARGETS Hyprland)
-
+# symlink: create link at install time, install it, and clean it up
 install(
   CODE "execute_process( \
         COMMAND ${CMAKE_COMMAND} -E create_symlink \
         ${CMAKE_INSTALL_FULL_BINDIR}/Hyprland \
-        \"\$ENV{DESTDIR}${CMAKE_INSTALL_FULL_BINDIR}/hyprland\" \
+        ${CMAKE_CURRENT_BINARY_DIR}/hyprland.link \
         )")
+install(
+  FILES ${CMAKE_CURRENT_BINARY_DIR}/hyprland.link
+  DESTINATION ${CMAKE_INSTALL_FULL_BINDIR}
+  RENAME hyprland)
+install(CODE "file(REMOVE ${CMAKE_CURRENT_BINARY_DIR}/hyprland.link)")
+
 # session file
 configure_file(
     ${CMAKE_SOURCE_DIR}/example/hyprland.desktop.in
@@ -741,7 +742,7 @@ if(BUILD_TESTING)
   enable_testing()
   add_custom_target(tests)
 
-  add_dependencies(tests hyprland_gtests)
+  add_dependencies(tests hyprland_gtests start-hyprland)
 
 else()
   message(STATUS "Testing is disabled")
